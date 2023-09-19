@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::Formatter;
 use std::str::FromStr;
-use crate::dto::CarDto;
+use crate::dto::car_dto::CarDto;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Car {

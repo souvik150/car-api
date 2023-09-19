@@ -1,4 +1,4 @@
-use crate::model::{Car, CarType};
+use crate::models::car_model::{Car, CarType};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]

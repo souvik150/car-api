@@ -1,9 +1,9 @@
 use std::str::FromStr;
 use mongodb::bson::{doc, oid::ObjectId};
 use mongodb::{Client, Collection, options::ClientOptions};
-use crate::config::Config;
+use crate::config::config::Config;
 
-use crate::model::Car;
+use crate::models::car_model::Car;
 
 const DB_NAME: &str = "cars_info";
 const COLLECTION_NAME: &str = "cars";
@@ -15,12 +15,14 @@ pub struct MongoDbClient {
 
 impl MongoDbClient {
     pub async fn new(config: Config) -> Self {
-        let client_options = ClientOptions::parse(&config.mongodb_uri).await.unwrap();
+      let client_options = ClientOptions::parse(&config.mongodb_uri).await
+      .expect("Failed to parse MongoDB connection options");
         let mongodb_client = Client::with_options(client_options).expect("Failed to create MongoDB client");
         Self {
             client: mongodb_client,
         }
     }
+    
     pub async fn get_car(&self, car_id: &str) -> Result<Car, anyhow::Error> {
         let id = ObjectId::from_str(car_id)
             .map_err(|e| anyhow::anyhow!("Failed to convert id to ObjectId: {}", e))?;

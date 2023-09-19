@@ -1,85 +1,23 @@
-mod model;
+mod models;
 mod db;
 mod dto;
 mod config;
+mod controllers;
+mod utils;
+mod seeder;
 
-use actix_web::{get, web, App, HttpResponse, HttpServer, Responder, Result, HttpRequest, post, delete};
+use crate::config::config::Config;
+use crate::db::db::MongoDbClient;
+use crate::seeder::car_seeder as seed;
+use serde::{Serialize};
+use actix_web::{get, web, App, HttpResponse, HttpServer, Responder, Result};
 use actix_web::web::Data;
-use serde::{Serialize, Deserialize};
-use crate::config::Config;
-use crate::db::MongoDbClient;
-use crate::dto::CarDto;
-use std::fs::File;
-use std::io::Read;
-
 
 #[derive(Serialize)]
 pub struct Response {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct Car {
-    brand: String,
-    name: String,
-    year: i32,
-    r#type: String,
-}
-
-fn read_json_file(file_path: &str) -> Result<String, Box<dyn std::error::Error>> {
-    // Open the JSON file.
-    let mut file = File::open(file_path)?;
-
-    // Read the file content into a String.
-    let mut json_string = String::new();
-    file.read_to_string(&mut json_string)?;
-
-    Ok(json_string)
-}
-
-pub async fn seed() -> Result<(), Box<dyn std::error::Error>> {
-
-    let config = Config::new();
-
-
-    if config.env == "prod" {
-        println!("Skipping seeding in prod environment.");
-        return Ok(());
-    }
-    
-    let data = setup(config).await;
-    let existing_cars = data.get_cars().await?;
-
-    if !existing_cars.is_empty() {
-        println!("Data already exists in the database. Skipping seeding.");
-        return Ok(());
-    }
-
-    let file_path = "./../seed/cars.json";
-    let json_string = read_json_file(file_path)?;
-    let cars: Vec<Car> = serde_json::from_str(&json_string)?;
-
-    for car in cars {
-        let car_type = match car.r#type.as_str() {
-            "Sedan" => model::CarType::Sedan,
-            "Hatchback" => model::CarType::Hatchback,
-            _ => model::CarType::Other,
-        };
-
-        let car = model::Car {
-            id: None,
-            name: car.name,
-            brand: car.brand,
-            year: car.year,
-            r#type: car_type,
-        };
-
-        data.create_car(car).await?;
-    }
-
-    println!("Seeding completed.");
-    Ok(())
-}
 
 #[get("/health")]
 async fn healthcheck() -> impl Responder {
@@ -97,46 +35,6 @@ async fn index() -> impl Responder {
     HttpResponse::Ok().json(response)
 }
 
-#[get("/cars")]
-async fn get_cars(data: web::Data<db::MongoDbClient>) -> Result<HttpResponse> {
-    let cars = data.get_cars().await.unwrap();
-    Ok(HttpResponse::Ok().json(cars.iter().map(CarDto::from).collect::<Vec<_>>()))
-}
-
-#[get("/cars/{id}")]
-async fn get_car(req: HttpRequest, data: web::Data<db::MongoDbClient>) -> Result<HttpResponse> {
-    let car_id = req.match_info().get("id").unwrap();
-    let car = data.get_car(car_id).await;
-    match car {
-        Ok(car) => Ok(HttpResponse::Ok().json(CarDto::from(&car))),
-        Err(_) => Ok(HttpResponse::NotFound().json(Response {
-            message: "Resource not found".to_string(),
-        }))
-    }
-}
-
-#[post("/cars")]
-async fn create_car(car_dto: web::Json<dto::CarDto>, data: web::Data<db::MongoDbClient>) -> Result<HttpResponse> {
-    let result = data.create_car(car_dto.into_inner().into()).await;
-    match result {
-        Ok(_) => Ok(HttpResponse::Ok().json(CarDto::from(&result.unwrap()))),
-        Err(_) => Ok(HttpResponse::InternalServerError().json(Response {
-            message: "Error creating car".to_string(),
-        }))
-    }
-}
-
-#[delete("/cars/{id}")]
-async fn delete_car(req: HttpRequest, data: web::Data<db::MongoDbClient>) -> Result<HttpResponse> {
-    let car_id = req.match_info().get("id").unwrap();
-    let result = data.delete_car(car_id).await;
-    match result {
-        Ok(_) => Ok(HttpResponse::Ok().finish()),
-        Err(_) => Ok(HttpResponse::InternalServerError().json(Response {
-            message: "Error deleting car".to_string(),
-        }))
-    }
-}
 
 async fn not_found() -> Result<HttpResponse> {
     let response = Response {
@@ -146,7 +44,7 @@ async fn not_found() -> Result<HttpResponse> {
 }
 
 async fn setup(config: Config) -> Data<MongoDbClient> {
-    let cars_db = db::MongoDbClient::new(config).await;
+    let cars_db = MongoDbClient::new(config).await;
     let app_data = web::Data::new(cars_db);
     app_data
 }
@@ -155,37 +53,35 @@ async fn setup(config: Config) -> Data<MongoDbClient> {
 async fn main() -> std::io::Result<()> {
     let config = Config::new();
     let data = setup(config).await;
-    seed().await.unwrap();
+    
+    seed::seed().await.unwrap();
     HttpServer::new(move ||
         App::new()
-            .service(healthcheck)
             .app_data(data.clone())
+            .configure(controllers::car_controller::config)
+            .service(healthcheck)
             .default_service(web::route().to(not_found))
-            .service(get_cars)
-            .service(create_car)
-            .service(get_car)
-            .service(delete_car)
-            .service(index)
+            .wrap(actix_web::middleware::Logger::default())
+            
     )
         .bind(("127.0.0.1", 8080))?
         .run()
         .await
 }
 
+
 #[cfg(test)]
 mod tests {
-    use std::env;
-    use std::io::Read;
-    use std::thread::sleep;
-    use super::*;
-    use actix_web::http::StatusCode;
-    use actix_web::test;
-    use actix_web::test::TestRequest;
-    use testcontainers::{clients, Image};
-    use testcontainers::core::{ExecCommand, WaitFor};
-    use testcontainers::images::generic::GenericImage;
-    use crate::model::CarType;
-    use crate::model::Car;
+  use super::*;
+  use actix_web::http::StatusCode;
+  use actix_web::test;
+  use actix_web::test::TestRequest;
+  use testcontainers::{clients};
+  use testcontainers::core::{ WaitFor};
+  use testcontainers::images::generic::GenericImage;
+  use crate::models::car_model::{Car,CarType};
+  use crate::dto::car_dto::CarDto;
+  use crate::controllers::car_controller::{get_cars, create_car, get_car, delete_car};
 
     #[actix_web::test]
     async fn test_index() {
@@ -233,7 +129,6 @@ mod tests {
         let result: Car = test::read_body_json(resp).await; 
         let mut config = Config::new();
         config.mongodb_uri = format!("mongodb://root:root@localhost:{}", port);
-        let data = setup(config).await;
         assert_eq!(result.name, "Test");
 
         let req = TestRequest::default().uri("/cars").to_request();
@@ -318,7 +213,7 @@ mod tests {
     }
 
     fn create_one_test_car() -> TestRequest {
-        let post = TestRequest::post().uri("/cars").set_json(&dto::CarDto {
+        let post = TestRequest::post().uri("/cars").set_json(&CarDto {
             id: None,
             name: "Test".to_string(),
             brand: "Test".to_string(),
